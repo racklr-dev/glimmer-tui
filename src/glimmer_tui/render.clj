@@ -39,6 +39,13 @@
 
 (defn- overlay? [n] (= :overlay (w/container-kind (:tag n))))
 
+(defn- collect-overlays
+  "All overlay nodes in `tree`, declaration order (parents before children, so
+  an overlay inside an overlay paints later and sits on top)."
+  [n]
+  (vec (concat (when (overlay? n) [n])
+               (mapcat collect-overlays (:children n)))))
+
 (defn- child-clip
   "The rectangle a node's children are confined to. Normally that is the node's
   own visible rect, but a scroll keeps a column for its scrollbar: content wider
@@ -49,6 +56,29 @@
     (intersect vis {:x (:x (:rect n)) :y (:y (:rect n)) :w (:w vp) :h (:h vp)})
     vis))
 
+(defn- stacks-vertically?
+  "Whether this container lays children out top-to-bottom (their rects are
+  y-sorted, so the off-screen head/tail can be skipped)."
+  [n]
+  (case (w/container-kind (:tag n))
+    :box (= :vertical (:orientation (:props n)))
+    (:scroll :window :frame) true
+    false))
+
+(defn- visible-kids
+  "Children of `n` that can intersect `clip`: drop the y-sorted head above the
+  clip, stop at the first child below it. Small or horizontal containers return
+  all children."
+  [n clip]
+  (let [kids (:children n)]
+    (if (or (nil? clip) (< (count kids) 12) (not (stacks-vertically? n)))
+      kids
+      (let [top (:y clip)
+            bottom (+ (:y clip) (:h clip))]
+        (->> kids
+             (drop-while (fn [c] (< (+ (:y (:rect c)) (:h (:rect c))) top)))
+             (take-while (fn [c] (< (:y (:rect c)) bottom))))))))
+
 (defn- paint!
   "Paint `n` and its children, clipped to `clip`. Overlay subtrees are collected
   rather than painted, and returned so the caller can paint them on top. Records
@@ -56,15 +86,15 @@
   that widget has scrolled out of view."
   [screen n clip ctx focus-vis]
   (if (overlay? n)
-    [n]
+    []
     (if-let [vis (intersect (:rect n) clip)]
       (do (paint-node! screen n vis ctx)
           (when (= (:id n) (:focus-id ctx)) (reset! focus-vis vis))
           (let [inner (child-clip n vis)]
-            (vec (mapcat #(paint! screen % inner ctx focus-vis) (:children n)))))
-      ;; an invisible subtree can still hold an overlay, which is anchored to the
-      ;; screen and does not care that its declaration site scrolled out of view
-      (vec (mapcat #(paint! screen % clip ctx focus-vis) (:children n))))))
+            (vec (mapcat #(paint! screen % inner ctx focus-vis)
+                         (visible-kids n inner)))))
+      ;; not visible: skip the whole subtree — overlays were collected up front
+      [])))
 
 (defn- find-node [n id]
   (first (filter #(= id (:id %)) (w/walk n))))
@@ -90,20 +120,16 @@
         full {:x 0 :y 0 :w cols :h rows}
         focus-vis (atom nil)]
     (scr/clear! screen)
-    ;; overlays paint last and against the whole screen, in declaration order, so
-    ;; a later one sits on top of an earlier one — and an overlay declared inside
-    ;; an overlay (a menu on a dialog) lands on top of both.
-    (loop [pending (paint! screen tree full ctx focus-vis)]
-      (when (seq pending)
-        (recur (vec (mapcat (fn [o]
-                              (if-let [vis (intersect (:rect o) full)]
-                                (do (paint-node! screen o vis ctx)
-                                    (when (= (:id o) (:focus-id ctx))
-                                      (reset! focus-vis vis))
-                                    (vec (mapcat #(paint! screen % vis ctx focus-vis)
-                                                 (:children o))))
-                                []))
-                            pending)))))
+    ;; Main pass paints only what intersects the screen — an off-screen subtree
+    ;; is skipped entirely. Overlays (collected up front, declaration order) then
+    ;; paint last against the whole screen, so a later one sits on top.
+    (paint! screen tree full ctx focus-vis)
+    (doseq [o (collect-overlays tree)]
+      (when-let [vis (intersect (:rect o) full)]
+        (paint-node! screen o vis ctx)
+        (when (= (:id o) (:focus-id ctx)) (reset! focus-vis vis))
+        (doseq [c (:children o)]
+          (paint! screen c vis ctx focus-vis))))
     ;; The caret is placed through the focused node's visible rect, so it hides
     ;; when that widget has scrolled out of view rather than parking on whatever
     ;; row its raw layout coords name.
