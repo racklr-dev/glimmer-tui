@@ -47,7 +47,8 @@
    [:delete-word-back ["ctrl+w" "alt+backspace"]]
    [:delete-word-fwd  ["alt+d"]]
    [:delete-to-start  ["ctrl+u"]]
-   [:delete-to-end    ["ctrl+k"]]])
+   [:delete-to-end    ["ctrl+k"]]
+   [:yank             ["ctrl+y"]]])
 
 (defn- bindings [props] (k/merge-bindings default-bindings (:keys props)))
 
@@ -126,6 +127,23 @@
       (edit wid (str (subs v 0 from) (subs v to)) from)
       true)))
 
+(defn- kill! [wid from to]
+  "Delete [from to) and save it as the latest kill, so a following ctrl+y yanks
+  it back — the readline/gnome-terminal kill-and-yank loop."
+  (let [v (value (:state @wid))
+        from (max 0 from)
+        to (min (count v) to)]
+    (if (< from to)
+      (do (swap! wid assoc-in [:state :kill] (subs v from to))
+          (cut wid from to))
+      true)))
+
+(defn- yank! [wid]
+  (let [killed (get-in @wid [:state :kill] "")]
+    (if (seq killed)
+      (insert-text wid killed)
+      true)))
+
 (defn- handle-binding [wid event]
   (let [{:keys [props state]} @wid
         v (value state)
@@ -141,10 +159,11 @@
       :forward-word  (move wid (word-end v c))
       :delete-back   (cut wid (dec c) c)
       :delete-fwd    (cut wid c (inc c))
-      :delete-word-back (cut wid (word-start v c) c)
-      :delete-word-fwd  (cut wid c (word-end v c))
-      :delete-to-start  (cut wid 0 c)
-      :delete-to-end    (cut wid c (count v))
+      :delete-word-back (kill! wid (word-start v c) c)
+      :delete-word-fwd  (kill! wid c (word-end v c))
+      :delete-to-start  (kill! wid 0 c)
+      :delete-to-end    (kill! wid c (count v))
+      :yank             (yank! wid)
       ;; an action an app added through :keys that this field does not know is
       ;; declined rather than thrown on, so a custom binding (Tab for
       ;; completion) simply leaves the key free for whoever wants it
@@ -181,7 +200,7 @@
    :measure (fn [props _] {:w (or (:width-request props) 20) :h 1})
    :init-state (fn [props]
                  (let [t (str (or (:text props) ""))]
-                   {:value t :cursor (count t)}))
+                   {:value t :cursor (count t) :kill ""}))
    :sync-state (fn [props state]
                  (let [incoming (:text props)]
                    (if (and (some? incoming) (not= (str incoming) (:value state)))
