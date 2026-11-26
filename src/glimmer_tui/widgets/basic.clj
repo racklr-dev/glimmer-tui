@@ -9,15 +9,36 @@
 (defn- label-text [props]
   (str (or (:label props) (:text props) "")))
 
+(defn- label-cache
+  "The label text, its lines and its widest line, cached in widget state.
+  Keyed by object identity on the text: a label's string is stable across
+  repaints while its component is not re-rendering, so scrolling costs no
+  re-splitting and no re-measuring of the same label."
+  [props state]
+  (let [t (label-text props)]
+    (if (identical? t (:label state))
+      state
+      {:label t
+       :lines (text/lines t)
+       :block-width (text/block-width t)})))
+
 (def label-spec
   {:container :none
-   :measure (fn [props _] (let [t (label-text props)]
-                            {:w (text/block-width t) :h (count (text/lines t))}))
-   :paint   (fn [screen rect props _ _]
+   :measure (fn [props state]
+              (let [c (label-cache props state)]
+                {:w (:block-width c) :h (count (:lines c))}))
+   :derive-state (fn [props state _] (label-cache props state))
+   :paint   (fn [screen rect props n _]
               (let [st (w/style props)
-                    align (:align props :start)]
-                (doseq [[i line] (map-indexed vector (text/lines (label-text props)))
-                        :while (< i (:h rect))]
+                    align (:align props :start)
+                    lines (:lines (label-cache props (:state n)))
+                    vis (scr/visible-rect screen)
+                    start (if vis (max 0 (- (:y vis) (:y rect))) 0)
+                    end (if vis
+                          (min (count lines) (- (+ (:y vis) (:h vis)) (:y rect)))
+                          (count lines))]
+                (doseq [i (range start end)
+                        :let [line (nth lines i)]]
                   (scr/put! screen (:x rect) (+ (:y rect) i)
                             (w/text-align line (:w rect) align) st))))})
 

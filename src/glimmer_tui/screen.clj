@@ -32,6 +32,9 @@
 (defn put! [scr x y s style] ((:put! scr) x y s style))
 (defn cursor! [scr x y visible?] ((:cursor! scr) x y visible?))
 (defn present! [scr] ((:present! scr)))
+(defn visible-rect
+  "The rectangle this screen is clipped to, or nil when it is unclipped."
+  [scr] (:clip scr))
 
 (defn fill!
   "Paint `cells` spaces at (x, y) in `style` — the way a widget claims its
@@ -45,11 +48,14 @@
   "A view of `scr` that only lets writes inside `rect` through. Writes that
   straddle an edge are cut on a cell boundary; a wide glyph cut in half becomes a
   space, so the columns still line up. Clips compose, so nesting one inside
-  another narrows the window rather than widening it."
+  another narrows the window rather than widening it. The clipped view also
+  remembers its visible rectangle, so a widget can paint only the lines that
+  actually intersect it instead of every line of a tall scrollable label."
   [scr {:keys [x y w h] :as rect}]
   (if (nil? rect)
     scr
     (assoc scr
+           :clip rect
            :put!
            (fn [px py s style]
              (when (and (>= py y) (< py (+ y h)) (pos? w))

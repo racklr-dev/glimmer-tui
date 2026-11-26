@@ -455,6 +455,15 @@
                       :else nil)))))
      nil)))
 
+(defn- scroll-event?
+  "Whether `event` is the kind of input that scrolls a viewport: a mouse wheel
+  notch or one of the scroll key bindings. The event loop coalesces a burst of
+  these into one repaint, so a wheel or a held arrow key does not pile up a
+  frame per queued event and keep scrolling after the operator has stopped."
+  [event]
+  (or (and (= :mouse (:type event)) (#{:up :down} (:wheel event)))
+      (boolean (some #(keys/match? event %) ["up" "down" "pgup" "pgdn" "home" "end"]))))
+
 ;; --- bracketed paste ---------------------------------------------------------
 ;; The terminal is in bracketed-paste mode (curses/start!), so a paste arrives
 ;; wrapped in ESC [ 200~ ... ESC [ 201~ and is turned into one
@@ -680,17 +689,28 @@
       (loop [painted -1 elapsed 0]
         (drain!)
         (pump-timers!)
+        (when-let [event (read-event! win tick-ms paste-timeout-ms)]
+          (press! event quit-keys)
+          ;; A burst of scroll input arrives faster than a frame can paint (a
+          ;; wheel emits one event per notch, an arrow key repeats). Process the
+          ;; whole burst before the repaint below, so many notches cost one
+          ;; frame instead of one frame each and the transcript stops moving as
+          ;; soon as the operator's input does.
+          (when (scroll-event? event)
+            (loop []
+              (when-let [next-event (read-event! win 0 paste-timeout-ms)]
+                (press! next-event quit-keys)
+                (when (scroll-event? next-event)
+                  (recur))))))
         (let [d @w/dirty
-              painted (if (= d painted) painted (do (repaint!) d))]
-          (when-let [event (read-event! win tick-ms paste-timeout-ms)]
-            (press! event quit-keys))
-          ;; elapsed is counted in ticks rather than read from a clock: the loop
-          ;; has no other need for time, and a tick is a good enough unit for the
-          ;; auto-quit that smoke tests use.
-          (let [elapsed (+ elapsed tick-ms)]
-            (when-not (or (:quit? @app)
-                          (and auto-quit-ms (>= elapsed auto-quit-ms)))
-              (recur painted elapsed)))))
+              painted (if (= d painted) painted (do (repaint!) d))
+              ;; elapsed is counted in ticks rather than read from a clock: the
+              ;; loop has no other need for time, and a tick is a good enough
+              ;; unit for the auto-quit that smoke tests use.
+              elapsed (+ elapsed tick-ms)]
+          (when-not (or (:quit? @app)
+                        (and auto-quit-ms (>= elapsed auto-quit-ms)))
+            (recur painted elapsed))))
       (finally
         (reset! b/loop-running? false)
         (cancel-all!)
