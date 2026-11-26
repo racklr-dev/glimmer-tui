@@ -19,6 +19,7 @@
   no portability: it is resolved to a palette index before init_pair sees it."
   (:require [glimmer-tui.color :as color]
             [glimmer-tui.ffi :as c]
+            [glimmer-tui.terminal :as term]
             [jolt.ffi :as ffi]))
 
 (defn- attrs-of
@@ -95,7 +96,15 @@
          (c/wmove win py px)
          (c/curs-set (if visible? 1 0)))
        nil)
-     :present! (fn [] (c/wnoutrefresh win) (c/doupdate) nil)}))
+     :present! (fn []
+                 (c/wnoutrefresh win)
+                 ;; CSI ? 2026 brackets the physical update: on a terminal that
+                 ;; supports synchronized output the whole frame lands at once
+                 ;; (no tearing); one that does not ignores the unknown mode.
+                 (term/emit! term/sync-on)
+                 (c/doupdate)
+                 (term/emit! term/sync-off)
+                 nil)}))
 
 ;; --- terminal lifecycle ------------------------------------------------------
 ;; initscr does not report failure, it calls exit(). In a REPL that loses the
@@ -163,10 +172,10 @@
 (def ^:private mouse-mode-off "\u001b[?1006l\u001b[?1002l\u001b[?1000l")
 
 (defn- emit!
-  "Write `s` straight to standard output, around ncurses rather than through it."
+  "Write `s` straight to fd 1, around ncurses rather than through it. Delegates
+  to glimmer-tui.terminal, which sizes the write by UTF-8 bytes."
   [s]
-  (c/write-fd 1 s (count s))
-  nil)
+  (term/emit! s))
 
 (defn start!
   "Put the terminal into raw, keypad, mouse-reporting mode and return the stdscr
@@ -207,6 +216,8 @@
     ;; and the raw reports decoded in glimmer-tui.core instead.
     (emit! paste-mode-on)
     (emit! mouse-mode-on)
+    ;; Best-effort XTVERSION probe for capability detection (notifications).
+    (term/detect! win)
     (c/flushinp)
     win))
 
